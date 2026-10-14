@@ -197,6 +197,10 @@ public sealed class Settings
      Description("Keyboard モードで、変換ボックスが出ていないときの 無変換 キーで英数 (直接入力) に、変換 キーで日本語入力にします (Mac の 英数 / かな キーと同じく、押す前のモードによらず決まったモードになります)。もう日本語入力のときの 変換 キーは今までどおり選択した文字の再変換です。変換ボックスが出ている間の 無変換・変換 は今までどおりで、切り替えません。「コード」のアプリのコードの行では、変換 キーでその行を日本語にします (半角/全角 と同じ)。")]
     public bool ConvertKeysSwitchKeyboard { get; set; }
 
+    /// <summary>Meltype IMEで、選択がないとき変換で日本語、無変換で英数にする。設定画面には表示しない。</summary>
+    [Browsable(false)]
+    public bool ConvertKeysSwitchIme { get; set; } = true;
+
     [Category("1. 全般"), DisplayName("左 Alt で英数 / 右 Alt で日本語"),
      Description("Keyboard モードで、左 Alt の単独押しで英数 (直接入力) に、右 Alt の単独押しで日本語入力にします (半角/全角 キーの無い US 配列向け)。Alt + Tab などの組み合わせや Alt + クリックでは切り替えません。単独押しでアプリのメニューバーに移らなくなります。変換ボックスが出ている間は切り替えません。「コード」のアプリのコードの行では、右 Alt でその行を日本語にします (半角/全角 と同じ)。")]
     public bool AltKeysSwitchKeyboard { get; set; }

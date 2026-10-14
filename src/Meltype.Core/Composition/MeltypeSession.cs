@@ -20,11 +20,21 @@ public readonly record struct TextEdit(int DeleteBefore, string Text, string? Ex
 /// </summary>
 public sealed record SessionResult(bool Consumed, IReadOnlyList<TextEdit> Commits, CompositionView? View)
 {
+    /// <summary>再変換で元の選択範囲を置換する文字。通常のキャレット位置への確定とは別に扱う。</summary>
+    public string? Replacement { get; init; }
+
     /// <summary>Swift などから読みやすいように JSON にする (NativeAOT でも使えるよう手書き)。</summary>
     public string ToJson()
     {
         var builder = new StringBuilder();
-        builder.Append("{\"consumed\":").Append(Consumed ? "true" : "false").Append(",\"commits\":[");
+        if (Replacement is { } replacement)
+        {
+            builder.Append("{\"replacement\":");
+            AppendString(builder, replacement);
+            builder.Append(',');
+        }
+        else builder.Append('{');
+        builder.Append("\"consumed\":").Append(Consumed ? "true" : "false").Append(",\"commits\":[");
         for (var i = 0; i < Commits.Count; i++)
         {
             if (i > 0) builder.Append(',');
@@ -349,6 +359,34 @@ public sealed class MeltypeSession
     /// <summary>変換ボックスに何か入っているか。</summary>
     public bool IsComposing => _controller.IsComposing;
 
+    /// <summary>OS側で選択範囲を検証してから、既存の変換キー処理で再変換する。</summary>
+    public SessionResult StartReconversion(ReconversionSelection selection)
+    {
+        if (IsComposing || !_settings().Enabled || string.IsNullOrWhiteSpace(selection.Reading) ||
+            selection.Text.Length is 0 or > 128) return new SessionResult(true, [], null);
+        ForgetLastCommit();
+        ForgetDirectInput();
+        _sigil.Lose();
+        _host.Selection = selection;
+        var result = HandleKey(VirtualKeys.Convert, null, false, false, false, false);
+        if (!IsComposing) _host.Selection = null;
+        return result;
+    }
+
+    /// <summary>選択やフォーカスが変わったときは、元の文字を置換せずに終了する。</summary>
+    public SessionResult CancelReconversion()
+    {
+        _host.Begin(null, false, null, null);
+        if (_host.Selection is not null)
+        {
+            _controller.Abandon("再変換の選択範囲が変わった");
+            _controller.Pump();
+            _host.Selection = null;
+            _controller.ResetContext();
+        }
+        return _host.Result(consumed: true);
+    }
+
     /// <summary>
     /// キーを 1 つ処理する。before / after は入力欄のキャレットの前後の文字列 (分かれば。英語とも日本語とも読める語の判定と変換の文脈に使う)。
     /// </summary>
@@ -376,7 +414,7 @@ public sealed class MeltypeSession
             (ch is { } directChar && !char.IsAsciiLetterOrDigit(directChar) && directChar is not ('@' or '_') ||
              before is { Length: > 0 } && !char.IsAsciiLetterOrDigit(before[^1]) && before[^1] is not ('@' or '_')))
             _directEnglishWord = false;
-        if ((Direct && (!_directModeDetection || !settings.DirectModeAutoDetect || _directEnglishWord)) || !settings.Enabled)
+        if ((Direct && _host.Selection is null && (!_directModeDetection || !settings.DirectModeAutoDetect || _directEnglishWord)) || !settings.Enabled)
         {
             return Track(_host.Result(consumed: false), vk, ch, modifier);
         }
@@ -386,7 +424,7 @@ public sealed class MeltypeSession
             if (CodeInput) TrackCodeKey(vk, ch, modifier);
             return Track(_host.Result(consumed: false), vk, ch, modifier);
         }
-        if (CodeInput && !_codeJapanese && !_controller.IsComposing &&
+        if (CodeInput && _host.Selection is null && !_codeJapanese && !_controller.IsComposing &&
             (before is null || LineContext.ClassifyText(before) == LineKind.Code))
         {
             TrackCodeKey(vk, ch, modifier);
@@ -396,7 +434,8 @@ public sealed class MeltypeSession
         if (shift && _controller.IsComposing) Feed(new KeyEvent(VirtualKeys.LShift, 0, false, false, false, down.TimeMs));
         if (modifier && _controller.IsComposing) Feed(new KeyEvent(control ? VirtualKeys.LControl : VirtualKeys.LMenu, 0, false, false, false, down.TimeMs));
 
-        var swallowed = Feed(down, e => !modifier && (StartsComposition(e, ch, shift) || e.Vk == VirtualKeys.Space && shift));
+        var swallowed = Feed(down, e => !modifier && (StartsComposition(e, ch, shift) ||
+            e.Vk == VirtualKeys.Convert && _host.Selection is not null || e.Vk == VirtualKeys.Space && shift));
         // このキーをアプリに送り直した (= 使わなかった) なら、アプリに渡す。
         var consumed = swallowed && !_host.ReplayedCurrent;
         Feed(down with { IsUp = true });
@@ -406,6 +445,8 @@ public sealed class MeltypeSession
         if (modifier && _controller.IsComposing) Feed(new KeyEvent(control ? VirtualKeys.LControl : VirtualKeys.LMenu, 0, false, true, false, down.TimeMs));
         if (shift && _controller.IsComposing) Feed(new KeyEvent(VirtualKeys.LShift, 0, false, true, false, down.TimeMs));
         var result = _host.Result(consumed);
+        if (result.Replacement is not null) _codeLine.Invalidate();
+        if (!_controller.IsComposing) _host.Selection = null;
         if (CodeInput)
         {
             foreach (var edit in result.Commits)
@@ -546,6 +587,19 @@ public sealed class MeltypeSession
     /// <summary>変換ボックスからの指示を集めて、1 回のキー入力の結果にまとめる。</summary>
     private sealed class Host : ICompositionHost
     {
+        public ReconversionSelection? Selection { get; set; }
+        private string? _replacement;
+
+        public ReconversionSelection? GetReconversionSelection() => Selection;
+
+        public bool TryReplaceSelection(ReconversionSelection selection, string text)
+        {
+            if (!ReferenceEquals(selection, Selection)) return false;
+            _replacement = text;
+            Selection = null;
+            return true;
+        }
+
         private readonly List<TextEdit> _commits = [];
         private int _pendingDelete;
         // このセッションで続けて確定した文字の終わりの部分 (確定し直しで消す文字を、DLL などで確かめられるように)
@@ -567,6 +621,7 @@ public sealed class MeltypeSession
         public void Begin(char? ch, bool shift, string? before, string? after)
         {
             _commits.Clear();
+            _replacement = null;
             _pendingDelete = 0;
             _char = ch;
             _shift = shift;
@@ -581,7 +636,7 @@ public sealed class MeltypeSession
             if (_pendingDelete > 0) Add("");
             // アプリに渡したキーの文字は、確定した文字の続きとしては分からない
             if (!consumed) ForgetCommitted();
-            return new SessionResult(consumed, _commits.ToList(), _hidden ? null : _view);
+            return new SessionResult(consumed, _commits.ToList(), _hidden ? null : _view) { Replacement = _replacement };
         }
 
         public void CommitText(string text) => Add(text);

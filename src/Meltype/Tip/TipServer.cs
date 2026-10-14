@@ -26,6 +26,9 @@ namespace Meltype.Tip;
 /// select の prediction は、予測変換の候補を選んだこと (付けなければ変換の候補)。
 /// key の code は、DLL が toggle・mode を送ること (付けない古い DLL では、コードの入力欄として扱わない)。
 /// key の private は、入力を覚えないように求める入力欄 (InputScope が IS_PRIVATE) であること。次の key まで学習しない。
+/// key の selection は選択文字があるか (取得失敗ならnull)、selectedText は変換キーで選択した128文字以内の原文。
+/// inputMode 応答は変換・無変換による日本語(true) / 英数(false)の指定。replacement は検証済みの元の選択範囲だけに入れる。
+/// commit の cancelReconversion は、選択変更・フォーカス喪失で原文を置換せず終了する指定。
 /// passed は、DLL がアプリに通したキー (0 はキーなしでキャレットが動いた、-1 は文字が変わっただけ)。key・toggle にも、まだ伝えていなければ付ける。
 /// 応答: {"active":true, "consumed":…, "commits":[…], "view":{…}, "code":…, "english":…} (active が false なら DLL は何もせずにキーを通す)
 /// code はコードの入力欄か、english は次に打つキーがコードの行なので英数のまま通るか (DLL はタスクバーに「A」を出す)。
@@ -507,6 +510,7 @@ internal sealed class TipServer : IDisposable
         }
         SessionResult result;
         var switchedToJapanese = false;
+        bool? inputMode = null;
         switch (op)
         {
             case "key" when !active:
@@ -534,6 +538,40 @@ internal sealed class TipServer : IDisposable
                 // キャレットの前も 20 文字しか送らない。コードの入力欄として扱うと、コードの行を日本語にできないので、一般として扱う
                 var process = IsTrue(root, "code") ? String(root, "process") : null;
                 var before = UpdateCodeInput(session, process, String(root, "before"));
+                if (!session.IsComposing && mods == 0 && vk is Input.VirtualKeys.Convert or Input.VirtualKeys.NonConvert)
+                {
+                    // 選択の取得に失敗した場合も切り替えない。新しいDLLだけがselectionを付ける。
+                    if (root.TryGetProperty("selection", out var selection))
+                    {
+                        if (selection.ValueKind == JsonValueKind.True)
+                        {
+                            var text = String(root, "selectedText");
+                            var reading = vk == Input.VirtualKeys.Convert && text is { Length: > 0 and <= 128 }
+                                ? (CompositionController.IsRomajiText(text) ? text : _composition.GuessReading(text)) : null;
+                            result = !string.IsNullOrWhiteSpace(reading)
+                                ? session.StartReconversion(new ReconversionSelection(text!, reading))
+                                : new SessionResult(true, [], null);
+                            break;
+                        }
+                        if (selection.ValueKind == JsonValueKind.Null)
+                        {
+                            result = new SessionResult(true, [], null);
+                            break;
+                        }
+                        if (selection.ValueKind == JsonValueKind.False && _settings().ConvertKeysSwitchIme)
+                        {
+                            inputMode = vk == Input.VirtualKeys.Convert;
+                            session.ForgetLastCommit();
+                            session.ForgetDirectInput();
+                            // IMEが英数でも、コードの行の日本語指定は先に更新する。
+                            session.Direct = false;
+                            session.SetCodeLine(inputMode.Value, before);
+                            session.Direct = !inputMode.Value;
+                            result = new SessionResult(true, [], null);
+                            break;
+                        }
+                    }
+                }
                 result = session.HandleKey(vk, ch is > 0 and < 0x10000 ? (char)ch : null,
                     (mods & 1) != 0, (mods & 2) != 0, (mods & 4) != 0, (mods & 8) != 0, before, String(root, "after"));
                 switchedToJapanese = wasDirect && !session.Direct;
@@ -552,6 +590,11 @@ internal sealed class TipServer : IDisposable
                 return Reply(true, new SessionResult(false, [], null), session.CodeInput, english, null);
             }
             case "commit":
+                if (IsTrue(root, "cancelReconversion"))
+                {
+                    result = session.CancelReconversion();
+                    break;
+                }
                 // クリック・別の入力欄で確定した、アプリが確定した: 前の語を確定し直さない (確定する位置がキャレットと離れている)
                 if (IsTrue(root, "moved"))
                 {
@@ -567,7 +610,7 @@ internal sealed class TipServer : IDisposable
                 return Inactive;
         }
         return Reply(active, result, session.CodeInput, session.CodeEnglishAt(null),
-            DirectDetectionFor(String(root, "process")), switchedToJapanese, session.DirectEnglishWord);
+            DirectDetectionFor(String(root, "process")), switchedToJapanese, session.DirectEnglishWord, inputMode);
     }
 
     private bool DirectDetectionFor(string? process)
@@ -580,12 +623,13 @@ internal sealed class TipServer : IDisposable
     }
 
     private static string Reply(bool active, SessionResult result, bool code, bool english, bool? directDetection,
-        bool switchedToJapanese = false, bool? directEnglishWord = null)
+        bool switchedToJapanese = false, bool? directEnglishWord = null, bool? inputMode = null)
     {
         var json = result.ToJson();
         var detection = directDetection is { } enabled ? $"\"directDetection\":{(enabled ? "true" : "false")}," : "";
         var englishWord = directEnglishWord is { } isEnglishWord ? $"\"directEnglishWord\":{(isEnglishWord ? "true" : "false")}," : "";
-        return $"{{\"active\":{(active ? "true" : "false")},\"code\":{(code ? "true" : "false")},\"english\":{(english ? "true" : "false")},{detection}{englishWord}\"switchToJapanese\":{(switchedToJapanese ? "true" : "false")},{json[1..]}";
+        var mode = inputMode is { } japanese ? $"\"inputMode\":{(japanese ? "true" : "false")}," : "";
+        return $"{{\"active\":{(active ? "true" : "false")},\"code\":{(code ? "true" : "false")},\"english\":{(english ? "true" : "false")},{detection}{englishWord}{mode}\"switchToJapanese\":{(switchedToJapanese ? "true" : "false")},{json[1..]}";
     }
 
     /// <summary>

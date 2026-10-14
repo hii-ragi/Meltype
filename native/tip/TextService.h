@@ -88,6 +88,8 @@ private:
     bool ServerReady();
     void Hello();
     void HandleKey(ITfContext* context, UINT vk, wchar_t ch);
+    bool ReconversionSelectionUnchanged(TfEditCookie ec, ITfContext* context);
+    void CancelReconversion();
     // コードの行を日本語にする / 英数に戻すよう Meltype.exe に頼む。そうしたなら true
     bool SetCodeLine(ITfContext* context, bool japanese);
     // キャレットが動いたときに、次に打つキーが英数か Meltype.exe に聞く (コードエディターのとき。編集の通知の中で呼ぶ)
@@ -141,6 +143,11 @@ private:
 
     ITfComposition* composition_ = nullptr;
     ITfContext* compositionContext_ = nullptr;
+    // 再変換の候補を選んでいる間は原文・選択範囲を編集しない。確定時だけ置換する。
+    Microsoft::WRL::ComPtr<ITfRange> reconversionRange_;
+    Microsoft::WRL::ComPtr<ITfContext> reconversionContext_;
+    std::wstring reconversionText_;
+    HWND reconversionForeground_ = nullptr;
 
     TfGuidAtom atomInput_ = TF_INVALID_GUIDATOM;
     TfGuidAtom atomConverted_ = TF_INVALID_GUIDATOM;

@@ -12,6 +12,92 @@ internal static class SessionFacadeTests
 {
     private static MeltypeSession Create() => new(CompositionTests.Detector, new CompositionTests.FakeConverter(), new CompositionOptions(), () => new Settings());
 
+    [Test]
+    public static void ImeReconversion_CommitsAsSelectionReplacement()
+    {
+        var session = Create();
+        var started = session.StartReconversion(new("今日", "きょう"));
+        Assert.True(started.Consumed && started.View?.Converting == true, "変換キーで再変換を開始する");
+        Assert.Equal(0, started.Commits.Count);
+        Assert.True(started.Replacement is null, "候補表示中は置換しない");
+        var candidate = started.View!.Text;
+        var committed = session.HandleKey(VirtualKeys.Return, null, false, false, false, false);
+        Assert.Equal(candidate, committed.Replacement);
+        Assert.Equal(0, committed.Commits.Count);
+        Assert.True(!session.IsComposing, "確定で終了する");
+        using var json = System.Text.Json.JsonDocument.Parse(committed.ToJson());
+        Assert.Equal(candidate, json.RootElement.GetProperty("replacement").GetString());
+    }
+
+    [Test]
+    public static void ImeReconversion_EscapeAndFocusLossKeepOriginal()
+    {
+        foreach (var escape in new[] { true, false })
+        {
+            var session = Create();
+            session.StartReconversion(new("今日", "きょう"));
+            var cancelled = escape
+                ? session.HandleKey(VirtualKeys.Escape, null, false, false, false, false)
+                : session.CancelReconversion();
+            Assert.True(cancelled.Replacement is null && cancelled.Commits.Count == 0 && cancelled.View is null, "取消では文字を変更しない");
+            Assert.True(!session.IsComposing, "取消で終了する");
+            Type(session, "kana");
+            var next = session.HandleKey(VirtualKeys.Return, null, false, false, false, false);
+            Assert.True(next.Replacement is null && next.Commits.Count > 0, "次の入力は通常の確定");
+        }
+    }
+
+    [Test]
+    public static void ImeReconversion_WorksInDirectModeAndCodeLines()
+    {
+        var settings = new Settings { DirectModeAutoDetect = false };
+        var session = new MeltypeSession(CompositionTests.Detector, new CompositionTests.FakeConverter(),
+            new CompositionOptions(), () => settings, directModeDetection: true) { Direct = true, CodeInput = true };
+        var started = session.StartReconversion(new("今日", "きょう"));
+        Assert.True(started.View?.Converting == true, "英数・コードでも選択文字は再変換できる");
+        var next = session.HandleKey(VirtualKeys.Convert, null, false, false, false, false);
+        Assert.True(next.Consumed && next.View?.Converting == true, "再変換中は変換キーを候補選択に使う");
+        var committed = session.HandleKey(VirtualKeys.Return, null, false, false, false, false);
+        Assert.True(committed.Replacement is not null && committed.Commits.Count == 0, "元の選択範囲だけを置換する");
+        Assert.True(session.Direct, "再変換は入力モードを変えない");
+    }
+
+    [Test]
+    public static void ImeReconversion_RejectsMissingReadingAndLongSelections()
+    {
+        foreach (var selection in new[] { new ReconversionSelection("今日", ""), new("", "きょう"), new(new string('あ', 129), "あ") })
+        {
+            var session = Create();
+            var result = session.StartReconversion(selection);
+            Assert.True(!session.IsComposing && result.View is null && result.Replacement is null && result.Commits.Count == 0, "対象外の選択では開始しない");
+        }
+    }
+
+    [Test]
+    public static void ImeReconversion_BackspaceClearsState()
+    {
+        var session = Create();
+        session.StartReconversion(new("橋", "はし"));
+        for (var i = 0; i < 3; i++) session.HandleKey(VirtualKeys.Back, null, false, false, false, false);
+        Assert.True(!session.IsComposing, "読みを消し切ると終了する");
+        Type(session, "kana");
+        var result = session.HandleKey(VirtualKeys.Return, null, false, false, false, false);
+        Assert.True(result.Replacement is null && result.Commits.Count > 0, "次の入力に選択範囲を持ち越さない");
+    }
+
+    [Test]
+    public static void ImeConversionKeySetting_DefaultsOnAndIsHiddenAndSerialized()
+    {
+        var settings = new Settings();
+        Assert.True(settings.ConvertKeysSwitchIme, "既定で有効");
+        var property = System.ComponentModel.TypeDescriptor.GetProperties(settings)[nameof(Settings.ConvertKeysSwitchIme)]!;
+        Assert.True(!property.IsBrowsable, "設定画面には追加しない");
+        settings.ConvertKeysSwitchIme = false;
+        Assert.True(!settings.Clone().ConvertKeysSwitchIme, "設定を複製してもOFFを保持");
+        using var json = System.Text.Json.JsonDocument.Parse(settings.ToJson());
+        Assert.True(!json.RootElement.GetProperty(nameof(Settings.ConvertKeysSwitchIme)).GetBoolean(), "設定ファイル経路でOFFを保持");
+    }
+
     /// <summary>文字を 1 つずつ打つ (英字は大文字なら Shift 付き)。</summary>
     private static List<SessionResult> Type(MeltypeSession session, string text, string? before = null)
     {

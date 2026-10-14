@@ -108,6 +108,44 @@ internal static class TipEndToEnd
                 // 確定したあと ← でキャレットを動かしてから英単語を打っても、前の文字を消して確定し直さない
                 await Case("動かしたあとは直さない", "i\n←want ", "want い");
 
+                async Task Press(int vk)
+                {
+                    Send((ushort)vk, false);
+                    Send((ushort)vk, true);
+                    await Task.Delay(400);
+                }
+                // 更新したTIP DLLで、選択文字の保持・取消・確定とモード切り替えを確認する。
+                box.Text = "前きょう後";
+                box.Select(1, 3);
+                await Task.Delay(200);
+                await Press(0x1C); // 変換
+                results.Add(("再変換の候補表示は原文を保持", "前きょう後", box.Text));
+                await Press(0x1B); // Esc
+                results.Add(("再変換の取消", "前きょう後", box.Text));
+                box.Select(1, 3);
+                await Press(0x1C);
+                await Press(0x0D); // Enter
+                results.Add(("再変換は選択部分だけ置換", "前今日後", box.Text));
+
+                box.Text = "前きょう後";
+                box.Select(1, 3);
+                await Press(0x1C);
+                box.Select(box.TextLength, 0);
+                await Press(0x0D);
+                results.Add(("選択変更で原文を維持", "前きょう後", box.Text.TrimEnd('\n')));
+
+                box.Clear();
+                await Press(0x1D); // 無変換で英数
+                // ローマ字の自動検知が始まる前の1文字でモードを確認。
+                TypeKeys("k");
+                await Task.Delay(400);
+                results.Add(("無選択の無変換で英数", "k", box.Text));
+                box.Clear();
+                await Press(0x1C); // 変換で日本語
+                TypeKeys("ka\n");
+                await Task.Delay(400);
+                results.Add(("無選択の変換で日本語", "か", box.Text));
+
                 if (ShotDirectory is { } directory)
                 {
                     // 見た目の確認用: 打っている途中 / 変換中 (候補の一覧と意味) を画像にする
